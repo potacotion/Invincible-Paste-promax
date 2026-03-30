@@ -1,0 +1,6 @@
+PyQt5
+keyboard
+pyperclip
+pywin32
+interception-python
+pynput
