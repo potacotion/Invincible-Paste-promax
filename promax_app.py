@@ -1,6 +1,7 @@
 import sys
 import os
 import json
+import math
 import time
 import random
 import threading
@@ -30,7 +31,20 @@ except Exception as e:
 else:
     interception_err = None
 
-CONFIG_FILE = "config.json"
+APP_VERSION = "1.0.0"
+
+INTERVAL_MAX = 1.0
+DELAY_MAX = 60.0
+
+
+def get_app_dir():
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+CONFIG_FILE = os.path.join(get_app_dir(), "config.json")
+CONFIG_BACKUP_FILE = CONFIG_FILE + ".bak"
 
 DEFAULT_CONFIG = {
     "mode": "clipboard",
@@ -42,6 +56,78 @@ DEFAULT_CONFIG = {
     "stop_hotkey": "F9",
     "advanced_mode": False
 }
+
+
+def _as_float(value, default, minimum, maximum):
+    if isinstance(value, bool):
+        return default
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(result):
+        return default
+    return min(max(result, minimum), maximum)
+
+
+def _as_bool(value, default):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in ("true", "1", "yes", "on"):
+            return True
+        if text in ("false", "0", "no", "off"):
+            return False
+    return default
+
+
+def _as_hotkey(value, default):
+    if isinstance(value, str) and value.strip():
+        return value
+    return default
+
+
+def sanitize_config(data):
+    """校验并规范化配置，非法值回退默认。返回 (clean_config, 被修正的键列表)。"""
+    if not isinstance(data, dict):
+        return DEFAULT_CONFIG.copy(), ["<root>"]
+
+    clean = {
+        "mode": data.get("mode") if data.get("mode") in ("clipboard", "input") else DEFAULT_CONFIG["mode"],
+        "input_text": data.get("input_text") if isinstance(data.get("input_text"), str) else DEFAULT_CONFIG["input_text"],
+        "interval": _as_float(data.get("interval"), DEFAULT_CONFIG["interval"], 0.0, INTERVAL_MAX),
+        "random_interval": _as_bool(data.get("random_interval"), DEFAULT_CONFIG["random_interval"]),
+        "delay": _as_float(data.get("delay"), DEFAULT_CONFIG["delay"], 0.0, DELAY_MAX),
+        "trigger_hotkey": _as_hotkey(data.get("trigger_hotkey"), DEFAULT_CONFIG["trigger_hotkey"]),
+        "stop_hotkey": _as_hotkey(data.get("stop_hotkey"), DEFAULT_CONFIG["stop_hotkey"]),
+        "advanced_mode": _as_bool(data.get("advanced_mode"), DEFAULT_CONFIG["advanced_mode"]),
+    }
+
+    issues = [key for key in data if key not in DEFAULT_CONFIG]
+    for key, default in DEFAULT_CONFIG.items():
+        raw = data.get(key, default)
+        expected = clean[key]
+        if key in ("trigger_hotkey", "stop_hotkey") and isinstance(raw, str):
+            changed = raw.strip() != expected
+        else:
+            changed = raw != expected
+        if changed:
+            issues.append(key)
+    return clean, issues
+
+
+def probe_driver():
+    """实际探测 Interception 驱动是否可用，返回 (ok, 状态描述)。"""
+    if interception is None:
+        return False, f"缺少 Interception 库 ({interception_err})"
+    try:
+        interception.get_keyboard()
+    except Exception:
+        return False, "Interception 库已安装，但驱动未安装或未生效（安装后需重启系统）"
+    return True, "Interception 驱动已就绪"
 
 class WorkerSignals(QObject):
     finished = pyqtSignal()
@@ -106,8 +192,10 @@ class TypingWorker(threading.Thread):
     def type_normal(self, text):
         interval = self.config.get("interval", 0.0)
         random_interval = self.config.get("random_interval", False)
+        stopped = False
         for char in text:
             if self.stop_requested:
+                stopped = True
                 self.signals.log.emit("已停止。")
                 break
             
@@ -119,7 +207,8 @@ class TypingWorker(threading.Thread):
                 if random_interval:
                     sleep_time = interval * random.uniform(0.5, 1.5)
                 time.sleep(sleep_time)
-        self.signals.log.emit("输入完成！")
+        if not stopped:
+            self.signals.log.emit("输入完成！")
 
     def type_advanced(self, text):
         if interception is None:
@@ -142,73 +231,118 @@ class TypingWorker(threading.Thread):
         START_SEQ = "]]u[["
         END_SEQ = "[[u]]"
         
-        self.signals.log.emit(f"发送高级模式特征码 {START_SEQ}...")
-        interception.write(START_SEQ)
-        time.sleep(0.1)
-        
-        self.signals.log.emit(f"发送编码数据 ({len(hex_text)} 个字符)...")
-        # 为保证接收准确，在大流量数据时稍微给点间隙
-        for char in hex_text:
-            if self.stop_requested:
-                self.signals.log.emit("已停止。")
-                break
-            interception.press(char)
+        started = False
+        try:
+            self.signals.log.emit(f"发送高级模式特征码 {START_SEQ}...")
+            interception.write(START_SEQ)
+            started = True
+            time.sleep(0.1)
             
-            if interval > 0:
-                sleep_time = interval
-                if random_interval:
-                    sleep_time = interval * random.uniform(0.5, 1.5)
-                time.sleep(sleep_time)
-            else:
-                time.sleep(0.005)
+            self.signals.log.emit(f"发送编码数据 ({len(hex_text)} 个字符)...")
+            # 为保证接收准确，在大流量数据时稍微给点间隙
+            for char in hex_text:
+                if self.stop_requested:
+                    self.signals.log.emit("已停止。")
+                    break
+                interception.press(char)
+                
+                if interval > 0:
+                    sleep_time = interval
+                    if random_interval:
+                        sleep_time = interval * random.uniform(0.5, 1.5)
+                    time.sleep(sleep_time)
+                else:
+                    time.sleep(0.005)
+        finally:
+            # 无论正常结束还是中途停止，都必须发送结束符，
+            # 否则接收端会永远停留在捕获模式，导致下一次传输破坏文本。
+            if started:
+                self.signals.log.emit(f"发送特征码结束符 {END_SEQ}...")
+                try:
+                    interception.write(END_SEQ)
+                except Exception as e:
+                    self.signals.error.emit(f"发送特征码结束符失败: {e}")
 
-        if not self.stop_requested:
-            self.signals.log.emit(f"发送特征码结束符 {END_SEQ}...")
-            interception.write(END_SEQ)
+        if started and not self.stop_requested:
             self.signals.log.emit("高级模式输入完成！")
 
 
 class MainWindow(QWidget):
     log_signal = pyqtSignal(str)
+    driver_signal = pyqtSignal(str)
 
     def __init__(self):
         super().__init__()
         self.config = DEFAULT_CONFIG.copy()
+        self._pending_logs = []
         self.worker = None
         self.my_pid = os.getpid()
+        self._hotkey_handles = []
+        self._active_hotkeys = None
+        self._last_trigger_time = 0.0
+        self._save_error_logged = False
         self.log_signal.connect(self.append_log)
         self.load_config()
         self.init_ui()
+        self.driver_signal.connect(self.lbl_driver.setText)
         self.connect_signals()
+        for message in self._pending_logs:
+            self.append_log(message)
+        self._pending_logs.clear()
+        self.append_log(f"无敌粘贴大法promax v{APP_VERSION}")
         self.register_hotkeys()
 
     def load_config(self):
-        if os.path.exists(CONFIG_FILE):
+        if not os.path.exists(CONFIG_FILE):
+            return
+        try:
+            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except Exception as e:
+            self._pending_logs.append(f"配置文件读取失败 ({e})，已备份为 {os.path.basename(CONFIG_BACKUP_FILE)} 并使用默认配置。")
             try:
-                with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    self.config.update(data)
-            except Exception as e:
-                print(f"Failed to load config: {e}")
+                shutil.copyfile(CONFIG_FILE, CONFIG_BACKUP_FILE)
+            except Exception:
+                pass
+            return
+
+        self.config, issues = sanitize_config(data)
+        if issues:
+            self._pending_logs.append(f"配置项异常已回退默认值: {', '.join(issues)}")
 
     def save_config(self, *args):
+        if not hasattr(self, 'radio_clip'):
+            return
+
         self.config["mode"] = "clipboard" if self.radio_clip.isChecked() else "input"
         self.config["input_text"] = self.text_input.toPlainText()
         self.config["interval"] = self.spin_interval.value()
         self.config["random_interval"] = self.chk_random.isChecked()
         self.config["delay"] = self.spin_delay.value()
-        self.config["trigger_hotkey"] = self.edit_trigger.text()
-        self.config["stop_hotkey"] = self.edit_stop.text()
+        self.config["trigger_hotkey"] = self.edit_trigger.text().strip()
+        self.config["stop_hotkey"] = self.edit_stop.text().strip()
         self.config["advanced_mode"] = self.chk_adv.isChecked()
-        
+
         try:
-            with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+            tmp_path = CONFIG_FILE + ".tmp"
+            with open(tmp_path, 'w', encoding='utf-8') as f:
                 json.dump(self.config, f, ensure_ascii=False, indent=4)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, CONFIG_FILE)
         except Exception as e:
-            print(f"Failed to save config: {e}")
+            if not self._save_error_logged:
+                self._save_error_logged = True
+                self.append_log(f"配置保存失败 ({CONFIG_FILE}): {e}")
+        else:
+            self._save_error_logged = False
+
+    def closeEvent(self, event):
+        self.save_config()
+        event.accept()
 
     def init_ui(self):
-        self.setWindowTitle("无敌粘贴大法promax")
+        self.setWindowTitle(f"无敌粘贴大法promax v{APP_VERSION}")
         self.resize(550, 650)
         
         main_layout = QVBoxLayout()
@@ -281,11 +415,11 @@ class MainWindow(QWidget):
         vbox_hotkeys.addLayout(hbox_keys)
 
         hbox_manual = QHBoxLayout()
-        self.btn_start = QPushButton("▶ 手动开始 (F8)")
+        self.btn_start = QPushButton(f"▶ 手动开始 ({self.config['trigger_hotkey']})")
         self.btn_start.setStyleSheet("background-color: #e1f5fe; height: 35px; font-weight: bold;")
         self.btn_start.clicked.connect(self.on_trigger)
         
-        self.btn_stop_manual = QPushButton("■ 手动停止 (F9)")
+        self.btn_stop_manual = QPushButton(f"■ 手动停止 ({self.config['stop_hotkey']})")
         self.btn_stop_manual.setStyleSheet("background-color: #ffebee; height: 35px; font-weight: bold;")
         self.btn_stop_manual.clicked.connect(self.on_stop)
         
@@ -304,11 +438,8 @@ class MainWindow(QWidget):
         vbox_adv.addWidget(self.chk_adv)
         
         hbox_driver = QHBoxLayout()
-        if interception:
-            status_text = "Interception 库已安装"
-        else:
-            status_text = f"缺少 Interception 库 ({interception_err})"
-            
+        _, status_text = probe_driver()
+
         self.lbl_driver = QLabel(f"驱动状态: {status_text}")
         hbox_driver.addWidget(self.lbl_driver)
         
@@ -340,45 +471,98 @@ class MainWindow(QWidget):
         self.chk_random.stateChanged.connect(self.save_config)
         self.spin_delay.valueChanged.connect(self.save_config)
         self.chk_adv.stateChanged.connect(self.save_config)
+        self.edit_trigger.textChanged.connect(self.save_config)
+        self.edit_stop.textChanged.connect(self.save_config)
         self.btn_apply_hotkeys.clicked.connect(self.apply_hotkeys)
 
-    def apply_hotkeys(self):
-        self.save_config()
-        self.register_hotkeys()
+    def update_hotkey_buttons(self, trigger_key, stop_key):
+        self.btn_start.setText(f"▶ 手动开始 ({trigger_key})")
+        self.btn_stop_manual.setText(f"■ 手动停止 ({stop_key})")
+
+    def remove_hotkeys(self):
+        for handle in self._hotkey_handles:
+            try:
+                keyboard.remove_hotkey(handle)
+            except Exception:
+                pass
+        self._hotkey_handles = []
 
     def register_hotkeys(self):
-        # 移除之前可能存在的所有热键，防止重复注册
-        try:
-            keyboard.unhook_all()
-        except:
-            pass
-            
-        trigger_key = self.config.get("trigger_hotkey", "F8")
-        stop_key = self.config.get("stop_hotkey", "F9")
-        
-        # 更新按钮显示
-        if hasattr(self, 'btn_start'):
-            self.btn_start.setText(f"▶ 手动开始 ({trigger_key})")
-        if hasattr(self, 'btn_stop_manual'):
-            self.btn_stop_manual.setText(f"■ 手动停止 ({stop_key})")
+        trigger_key = str(self.config.get("trigger_hotkey", "F8")).strip()
+        stop_key = str(self.config.get("stop_hotkey", "F9")).strip()
 
         if not trigger_key or not stop_key:
-            self.append_log("警告: 热键配置不能为空")
+            self.append_log("警告: 热键配置不能为空，热键未注册。")
+            return False
+        if trigger_key.lower() == stop_key.lower():
+            self.append_log("警告: 触发键与停止键不能相同，热键未注册。")
+            return False
+
+        self.remove_hotkeys()
+        errors = []
+        for key, callback, label in ((trigger_key, self.on_trigger, "触发"),
+                                     (stop_key, self.on_stop, "停止")):
+            try:
+                keyboard.parse_hotkey(key)
+                handle = keyboard.add_hotkey(key, callback, suppress=True)
+                self._hotkey_handles.append(handle)
+                self.append_log(f"已注册{label}热键: {key}")
+            except Exception as e:
+                errors.append(f"注册{label}热键失败 ({key}): {e}")
+
+        if errors:
+            self.remove_hotkeys()
+            for error in errors:
+                self.append_log(error)
+            return False
+
+        self.update_hotkey_buttons(trigger_key, stop_key)
+        self._active_hotkeys = (trigger_key, stop_key)
+        return True
+
+    def restore_hotkey_fields(self, trigger_key, stop_key):
+        self.config["trigger_hotkey"] = trigger_key
+        self.config["stop_hotkey"] = stop_key
+        self.edit_trigger.setText(trigger_key)
+        self.edit_stop.setText(stop_key)
+        self.save_config()
+
+    def apply_hotkeys(self):
+        old_trigger, old_stop = self._active_hotkeys or (
+            str(self.config.get("trigger_hotkey", "F8")).strip(),
+            str(self.config.get("stop_hotkey", "F9")).strip())
+        trigger_key = self.edit_trigger.text().strip()
+        stop_key = self.edit_stop.text().strip()
+
+        if not trigger_key or not stop_key:
+            QMessageBox.warning(self, "热键无效", "触发键和停止键都不能为空。")
+            self.restore_hotkey_fields(old_trigger, old_stop)
+            return
+        if trigger_key.lower() == stop_key.lower():
+            QMessageBox.warning(self, "热键冲突", "触发键和停止键不能相同。")
+            self.restore_hotkey_fields(old_trigger, old_stop)
+            return
+        if len(trigger_key) == 1 or len(stop_key) == 1:
+            self.append_log("提示: 单字符热键会被全局吞掉并影响模拟输入，建议使用 F 键或组合键。")
+
+        self.config["trigger_hotkey"] = trigger_key
+        self.config["stop_hotkey"] = stop_key
+        self.save_config()
+
+        if self.register_hotkeys():
+            self.append_log("热键已生效。")
             return
 
-        try:
-            keyboard.add_hotkey(trigger_key, self.on_trigger, suppress=True)
-            self.append_log(f"已注册触发热键: {trigger_key}")
-        except Exception as e:
-            self.append_log(f"注册触发热键失败 ({trigger_key}): {e}")
-            
-        try:
-            keyboard.add_hotkey(stop_key, self.on_stop, suppress=True)
-            self.append_log(f"已注册停止热键: {stop_key}")
-        except Exception as e:
-            self.append_log(f"注册停止热键失败 ({stop_key}): {e}")
+        self.restore_hotkey_fields(old_trigger, old_stop)
+        self.register_hotkeys()
+        QMessageBox.warning(self, "热键无效", "新热键注册失败，已恢复原热键，详见日志。")
 
     def on_trigger(self):
+        now = time.time()
+        if now - self._last_trigger_time < 0.5:
+            return
+        self._last_trigger_time = now
+
         if self.worker is not None and self.worker.is_alive():
             self.log_signal.emit("当前已有任务正在运行中...")
             return
@@ -395,6 +579,9 @@ class MainWindow(QWidget):
             self.log_signal.emit("收到停止指令...")
 
     def append_log(self, text):
+        if not hasattr(self, 'log_output'):
+            self._pending_logs.append(text)
+            return
         t = time.strftime("%H:%M:%S")
         self.log_output.appendPlainText(f"[{t}] {text}")
         
@@ -410,12 +597,14 @@ class MainWindow(QWidget):
         if getattr(sys, 'frozen', False):
             base_path = sys._MEIPASS
         else:
-            base_path = os.getcwd()
+            base_path = get_app_dir()
+
+        app_dir = get_app_dir()
 
         # 优先使用本地已存在的 Interception_Installer 文件夹
         local_dir = os.path.join(base_path, "Interception_Installer")
         zip_path = os.path.join(base_path, "Interception.zip")
-        extract_dir = os.path.join(os.getcwd(), "Interception_Driver")
+        extract_dir = os.path.join(app_dir, "Interception_Driver")
         
         try:
             if os.path.exists(local_dir):
@@ -428,7 +617,7 @@ class MainWindow(QWidget):
                 else:
                     self.log_signal.emit("正在从网络下载 Interception 驱动...")
                     url = "https://github.com/oblitum/Interception/releases/download/v1.0.1/Interception.zip"
-                    source_zip = os.path.join(os.getcwd(), "Interception.zip")
+                    source_zip = os.path.join(app_dir, "Interception.zip")
                     urllib.request.urlretrieve(url, source_zip)
                     self.log_signal.emit("下载完成，正在解压...")
                 
@@ -436,14 +625,14 @@ class MainWindow(QWidget):
                     zip_ref.extractall(extract_dir)
                 target_dir = extract_dir
             
-            # 关键步骤：复制对应的 DLL 到当前目录，否则库无法加载
+            # 兼容旧版 interception-python（需要 interception.dll 才能加载）
             dll_src = os.path.join(target_dir, "library", "x64", "interception.dll")
             if not os.path.exists(dll_src):
                  dll_src = os.path.join(target_dir, "library", "x86", "interception.dll")
             
             if os.path.exists(dll_src):
-                shutil.copy(dll_src, os.getcwd())
-                self.log_signal.emit("已将 interception.dll 复制到程序目录。")
+                shutil.copy(dll_src, app_dir)
+                self.log_signal.emit(f"已将 interception.dll 复制到 {app_dir}。")
             
             installer_path = os.path.join(target_dir, "command line installer", "install-interception.exe")
             if os.path.exists(installer_path):
@@ -452,6 +641,7 @@ class MainWindow(QWidget):
                 cmd_command = f'"{installer_path}" /install'
                 ctypes.windll.shell32.ShellExecuteW(None, "runas", "cmd.exe", f"/k {cmd_command}", None, 1)
                 self.log_signal.emit("安装窗口已弹出，请在黑窗口中确认出现 'Successfully installed' 字样后重启电脑。")
+                self.driver_signal.emit("驱动状态: 安装程序已启动，安装完成后请重启系统")
             else:
                 self.log_signal.emit(f"错误: 未能在 {target_dir} 中找到 install-interception.exe。")
         except Exception as e:

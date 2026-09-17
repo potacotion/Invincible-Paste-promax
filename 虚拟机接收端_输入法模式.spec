@@ -1,5 +1,9 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+import os
+
+ICON_PATH = os.path.join(SPECPATH, 'assets', 'icon.ico')
+VERSION_PATH = os.path.join(SPECPATH, 'version_info_receiver.txt')
 
 a = Analysis(
     ['vm_receiver_app.py'],
@@ -23,6 +27,8 @@ exe = EXE(
     a.datas,
     [],
     name='虚拟机接收端_输入法模式',
+    icon=ICON_PATH,
+    version=VERSION_PATH,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="bgGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5B8DEF"/>
+      <stop offset="0.55" stop-color="#6C63FF"/>
+      <stop offset="1" stop-color="#9A4DFF"/>
+    </linearGradient>
+    <linearGradient id="boardGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#EAF0FF"/>
+    </linearGradient>
+    <linearGradient id="boltGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFD75E"/>
+      <stop offset="1" stop-color="#FFA51F"/>
+    </linearGradient>
+  </defs>
+
+  <!-- app tile -->
+  <rect x="16" y="16" width="480" height="480" rx="116" fill="url(#bgGrad)"/>
+
+  <!-- clipboard shadow -->
+  <rect x="136" y="124" width="236" height="304" rx="40" fill="#101A4D" opacity="0.18"/>
+
+  <!-- clipboard board -->
+  <rect x="136" y="100" width="236" height="304" rx="40" fill="url(#boardGrad)"/>
+
+  <!-- clip -->
+  <rect x="204" y="76" width="100" height="60" rx="22" fill="#C9D6F5"/>
+  <rect x="226" y="90" width="56" height="32" rx="12" fill="#8FA6E0"/>
+
+  <!-- text lines -->
+  <rect x="172" y="196" width="150" height="22" rx="11" fill="#AFC0EC"/>
+  <rect x="172" y="240" width="108" height="22" rx="11" fill="#C3D0F2"/>
+  <rect x="172" y="284" width="134" height="22" rx="11" fill="#AFC0EC"/>
+
+  <!-- lightning bolt -->
+  <path d="M306 174 L186 318 H294 L282 414 L402 270 H294 Z"
+        fill="#FFFFFF" stroke="#FFFFFF" stroke-width="26" stroke-linejoin="round"/>
+  <path d="M306 174 L186 318 H294 L282 414 L402 270 H294 Z"
+        fill="url(#boltGrad)" stroke="#E38B00" stroke-width="8" stroke-linejoin="round"/>
+</svg>

@@ -1,7 +1,11 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+import os
 
 from PyInstaller.utils.hooks import collect_submodules
+
+ICON_PATH = os.path.join(SPECPATH, 'assets', 'icon.ico')
+VERSION_PATH = os.path.join(SPECPATH, 'version_info_sender.txt')
 
 interception_imports = collect_submodules('interception')
 
@@ -27,6 +31,8 @@ exe = EXE(
     a.datas,
     [],
     name='无敌粘贴大法promax',
+    icon=ICON_PATH,
+    version=VERSION_PATH,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
