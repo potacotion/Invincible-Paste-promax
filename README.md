@@ -42,6 +42,13 @@
 - Python 3.8+（源码运行）
 - 高级模式需要管理员权限安装 Interception 驱动并重启系统
 
+### 直接下载（Releases）
+从 [Releases](https://github.com/potacotion/Invincible-Paste-promax/releases) 下载预编译版本，无需安装 Python：
+- `promax-sender-*.exe`：发送端（物理机运行，管理员权限）
+- `promax-vm-receiver-*.exe`：虚拟机接收端（拷贝进虚拟机运行）
+
+> 源码自行打包的产物名为 `无敌粘贴大法promax.exe` 与 `虚拟机接收端_输入法模式.exe`，与 Release 附件内容一致，Release 附件因 GitHub 不支持中文名而使用英文文件名。
+
 ### 源码运行
 ```bash
 pip install -r requirements.txt
